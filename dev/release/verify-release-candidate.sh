@@ -213,6 +213,7 @@ test_apt() {
         ;;
     esac
     if ! docker run --rm -v "${ARROW_DIR}":/arrow:delegated \
+           --security-opt="seccomp=unconfined" \
            "${target}" \
            /arrow/dev/release/verify-apt.sh \
            "${VERSION}" \
@@ -836,7 +837,7 @@ test_js() {
   show_header "Build and test JavaScript libraries"
 
   maybe_setup_nodejs || exit 1
-  maybe_setup_conda nodejs=17 || exit 1
+  maybe_setup_conda nodejs=16 || exit 1
 
   if ! command -v yarn &> /dev/null; then
     npm install -g yarn
@@ -1067,11 +1068,12 @@ test_macos_wheels() {
   # the interpreter should be installed from python.org:
   #   https://www.python.org/ftp/python/3.9.6/python-3.9.6-macosx10.9.pkg
   if [ "$(uname -m)" = "arm64" ]; then
-    for pyver in "3.9 3.10"; do
+    for pyver in 3.9 3.10; do
       local python="/Library/Frameworks/Python.framework/Versions/${pyver}/bin/python${pyver}"
 
       # create and activate a virtualenv for testing as arm64
       for arch in "arm64" "x86_64"; do
+        show_header "Testing Python ${pyver} universal2 wheel on ${arch}"
         VENV_ENV=wheel-${pyver}-universal2-${arch} PYTHON=${python} maybe_setup_virtualenv || continue
         # install pyarrow's universal2 wheel
         pip install pyarrow-${VERSION}-cp${pyver/.}-cp${pyver/.}-macosx_11_0_universal2.whl
