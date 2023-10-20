@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <absl/container/flat_hash_map.h>
+#include <cstdint>
 #include "arrow/array/array_base.h"
 #include "arrow/compute/api_scalar.h"
 #include "arrow/compute/cast.h"
@@ -41,37 +43,31 @@ struct SetLookupStateBase : public KernelState {
 
 template <typename Type>
 struct SetLookupState : public SetLookupStateBase {
+  using T = typename GetViewType<Type>::T;
+
   explicit SetLookupState(MemoryPool* pool) : memory_pool(pool) {}
 
   Status Init(const SetLookupOptions& options) {
     this->null_matching_behavior = options.GetNullMatchingBehavior();
-    if (options.value_set.is_array()) {
-      const ArrayData& value_set = *options.value_set.array();
-      memo_index_to_value_index.reserve(value_set.length);
-      lookup_table =
-          MemoTable(memory_pool,
-                    ::arrow::internal::HashTable<char>::kLoadFactor * value_set.length);
-      RETURN_NOT_OK(AddArrayValueSet(options, *options.value_set.array()));
-    } else if (options.value_set.kind() == Datum::CHUNKED_ARRAY) {
-      const ChunkedArray& value_set = *options.value_set.chunked_array();
-      memo_index_to_value_index.reserve(value_set.length());
-      lookup_table =
-          MemoTable(memory_pool,
-                    ::arrow::internal::HashTable<char>::kLoadFactor * value_set.length());
+    this->value_set = options.value_set;
+    if (this->value_set.is_array()) {
+      const ArrayData& value_set = *this->value_set.array();
+      lookup_table.reserve(value_set.length);
+
+      RETURN_NOT_OK(AddArrayValueSet(options, *this->value_set.array()));
+    } else if (value_set.kind() == Datum::CHUNKED_ARRAY) {
+      const ChunkedArray& value_set = *this->value_set.chunked_array();
+      lookup_table.reserve(value_set.length());
 
       int64_t offset = 0;
-      for (const std::shared_ptr<Array>& chunk : value_set.chunks()) {
+      for (const std::shared_ptr<Array>& chunk : this->value_set.chunks()) {
         RETURN_NOT_OK(AddArrayValueSet(options, *chunk->data(), offset));
         offset += chunk->length();
       }
     } else {
       return Status::Invalid("value_set should be an array or chunked array");
     }
-    if (this->null_matching_behavior != SetLookupOptions::SKIP &&
-        lookup_table->GetNull() >= 0) {
-      null_index = memo_index_to_value_index[lookup_table->GetNull()];
-    }
-    value_set_type = options.value_set.type();
+    value_set_type = this->value_set.type();
     return Status::OK();
   }
 
@@ -80,46 +76,25 @@ struct SetLookupState : public SetLookupStateBase {
     using T = typename GetViewType<Type>::T;
     int32_t index = static_cast<int32_t>(start_index);
     auto visit_valid = [&](T v) {
-      const auto memo_size = static_cast<int32_t>(memo_index_to_value_index.size());
-      int32_t unused_memo_index;
-      // (capture `memo_size` by value because of ARROW-17567)
-      auto on_found = [&, memo_size](int32_t memo_index) {
-        DCHECK_LT(memo_index, memo_size);
-      };
-      auto on_not_found = [&, memo_size](int32_t memo_index) {
-        DCHECK_EQ(memo_index, memo_size);
-        memo_index_to_value_index.push_back(index);
-      };
-      RETURN_NOT_OK(lookup_table->GetOrInsert(
-          v, std::move(on_found), std::move(on_not_found), &unused_memo_index));
+      lookup_table.try_emplace(v, index);
       ++index;
       return Status::OK();
     };
     auto visit_null = [&]() {
-      const auto memo_size = static_cast<int32_t>(memo_index_to_value_index.size());
-      auto on_found = [&, memo_size](int32_t memo_index) {
-        DCHECK_LT(memo_index, memo_size);
-      };
-      auto on_not_found = [&, memo_size](int32_t memo_index) {
-        DCHECK_EQ(memo_index, memo_size);
-        memo_index_to_value_index.push_back(index);
-      };
-      lookup_table->GetOrInsertNull(std::move(on_found), std::move(on_not_found));
+      if (null_index == -1) {
+        null_index = index;
+      }
       ++index;
       return Status::OK();
     };
 
     return VisitArraySpanInline<Type>(data, visit_valid, visit_null);
   }
-
-  using MemoTable = typename HashTraits<Type>::MemoTableType;
-  std::optional<MemoTable> lookup_table;  // use optional for delayed initialization
+  absl::flat_hash_map<T, int32_t> lookup_table;
   MemoryPool* memory_pool;
-  // When there are duplicates in value_set, the MemoTable indices must
-  // be mapped back to indices in the value_set.
-  std::vector<int32_t> memo_index_to_value_index;
   int32_t null_index = -1;
   SetLookupOptions::NullMatchingBehavior null_matching_behavior;
+  Datum value_set;
 };
 
 template <>
@@ -204,9 +179,9 @@ struct InitStateVisitor {
   // Handle Decimal128Type, FixedSizeBinaryType
   Status Visit(const FixedSizeBinaryType& type) { return Init<FixedSizeBinaryType>(); }
 
-  Status Visit(const MonthDayNanoIntervalType& type) {
-    return Init<MonthDayNanoIntervalType>();
-  }
+  // Status Visit(const MonthDayNanoIntervalType& type) {
+  //   return Init<MonthDayNanoIntervalType>();
+  // }
 
   Result<std::unique_ptr<KernelState>> GetResult() {
     if (arg_type.id() == Type::TIMESTAMP &&
@@ -303,12 +278,12 @@ struct IndexInVisitor {
     VisitArraySpanInline<Type>(
         input,
         [&](T v) {
-          int32_t index = state.lookup_table->Get(v);
-          if (index != -1) {
+          auto it = state.lookup_table.find(v);
+          if (it != state.lookup_table.end()) {
             bitmap_writer.Set();
 
             // matching needle; output index from value_set
-            *out_data++ = state.memo_index_to_value_index[index];
+            *out_data++ = it->second;
           } else {
             // no matching needle; output null
             bitmap_writer.Clear();
@@ -378,9 +353,9 @@ struct IndexInVisitor {
     return ProcessIndexIn<FixedSizeBinaryType>();
   }
 
-  Status Visit(const MonthDayNanoIntervalType& type) {
-    return ProcessIndexIn<MonthDayNanoIntervalType>();
-  }
+  // Status Visit(const MonthDayNanoIntervalType& type) {
+  //   return ProcessIndexIn<MonthDayNanoIntervalType>();
+  // }
 
   Status Execute() {
     const auto& state = checked_cast<const SetLookupStateBase&>(*ctx->state());
@@ -439,7 +414,7 @@ struct IsInVisitor {
     VisitArraySpanInline<Type>(
         input,
         [&](T v) {
-          if (state.lookup_table->Get(v) != -1) {  // true
+          if (state.lookup_table.find(v) != state.lookup_table.end()) {  // true
             writer_boolean.Set();
             writer_null.Set();
           } else if (state.null_matching_behavior == SetLookupOptions::INCONCLUSIVE &&
@@ -519,9 +494,9 @@ struct IsInVisitor {
     return ProcessIsIn<FixedSizeBinaryType>();
   }
 
-  Status Visit(const MonthDayNanoIntervalType& type) {
-    return ProcessIsIn<MonthDayNanoIntervalType>();
-  }
+  // Status Visit(const MonthDayNanoIntervalType& type) {
+  //   return ProcessIsIn<MonthDayNanoIntervalType>();
+  // }
 
   Status Execute() {
     const auto& state = checked_cast<const SetLookupStateBase&>(*ctx->state());
@@ -556,7 +531,7 @@ void AddBasicSetLookupKernels(ScalarKernel kernel,
   AddKernels(NumericTypes());
   AddKernels(TemporalTypes());
   AddKernels(DurationTypes());
-  AddKernels({month_day_nano_interval()});
+  // AddKernels({month_day_nano_interval()});
 
   std::vector<Type::type> other_types = {Type::BOOL, Type::DECIMAL128, Type::DECIMAL256,
                                          Type::FIXED_SIZE_BINARY};
