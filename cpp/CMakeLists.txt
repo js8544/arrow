@@ -860,6 +860,11 @@ if(ARROW_USE_XSIMD)
   list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_XSIMD})
 endif()
 
+if (ARROW_COMPUTE) 
+  list(APPEND ARROW_SHARED_LINK_LIBS absl::flat_hash_map)
+  list(APPEND ARROW_STATIC_LINK_LIBS absl::flat_hash_map)
+endif()
+
 add_custom_target(arrow_dependencies)
 add_custom_target(arrow_benchmark_dependencies)
 add_custom_target(arrow_test_dependencies)
