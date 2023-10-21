@@ -4233,7 +4233,6 @@ macro(build_google_cloud_cpp_storage)
   target_link_libraries(google-cloud-cpp::common
                         INTERFACE absl::base
                                   absl::cord
-                                  absl::flat_hash_map
                                   absl::memory
                                   absl::optional
                                   absl::span

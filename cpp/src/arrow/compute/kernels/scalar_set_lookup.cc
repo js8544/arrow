@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <absl/container/flat_hash_map.h>
 #include <cstdint>
+#include "absl/container/flat_hash_map.h"
 #include "arrow/array/array_base.h"
 #include "arrow/compute/api_scalar.h"
 #include "arrow/compute/cast.h"
