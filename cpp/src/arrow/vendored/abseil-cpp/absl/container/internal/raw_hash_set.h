@@ -1791,9 +1791,9 @@ class raw_hash_set {
   // Note: can't use `= default` due to non-default noexcept (causes
   // problems for some compilers). NOLINTNEXTLINE
   raw_hash_set() noexcept(
-      std::is_nothrow_default_constructible<hasher>::value &&
-      std::is_nothrow_default_constructible<key_equal>::value &&
-      std::is_nothrow_default_constructible<allocator_type>::value) {}
+      std::is_nothrow_default_constructible<hasher>::value&&
+          std::is_nothrow_default_constructible<key_equal>::value&&
+              std::is_nothrow_default_constructible<allocator_type>::value) {}
 
   ABSL_ATTRIBUTE_NOINLINE explicit raw_hash_set(
       size_t bucket_count, const hasher& hash = hasher(),
@@ -1921,9 +1921,9 @@ class raw_hash_set {
   }
 
   ABSL_ATTRIBUTE_NOINLINE raw_hash_set(raw_hash_set&& that) noexcept(
-      std::is_nothrow_copy_constructible<hasher>::value &&
-      std::is_nothrow_copy_constructible<key_equal>::value &&
-      std::is_nothrow_copy_constructible<allocator_type>::value)
+      std::is_nothrow_copy_constructible<hasher>::value&&
+          std::is_nothrow_copy_constructible<key_equal>::value&&
+              std::is_nothrow_copy_constructible<allocator_type>::value)
       :  // Hash, equality and allocator are copied instead of moved because
          // `that` must be left valid. If Hash is std::function<Key>, moving it
          // would create a nullptr functor that cannot be called.
@@ -1959,9 +1959,9 @@ class raw_hash_set {
   }
 
   raw_hash_set& operator=(raw_hash_set&& that) noexcept(
-      absl::allocator_traits<allocator_type>::is_always_equal::value &&
-      std::is_nothrow_move_assignable<hasher>::value &&
-      std::is_nothrow_move_assignable<key_equal>::value) {
+      absl::allocator_traits<allocator_type>::is_always_equal::value&&
+          std::is_nothrow_move_assignable<hasher>::value&&
+              std::is_nothrow_move_assignable<key_equal>::value) {
     // TODO(sbenza): We should only use the operations from the noexcept clause
     // to make sure we actually adhere to that contract.
     // NOLINTNEXTLINE: not returning *this for performance.
@@ -2703,7 +2703,7 @@ class raw_hash_set {
     }
   }
 
-  template<bool propagate_alloc>
+  template <bool propagate_alloc>
   raw_hash_set& assign_impl(raw_hash_set&& that) {
     // We don't bother checking for this/that aliasing. We just need to avoid
     // breaking the invariants in that case.
@@ -2764,6 +2764,7 @@ class raw_hash_set {
     auto hash = hash_ref()(key);
     auto seq = probe(common(), hash);
     const ctrl_t* ctrl = control();
+    FindInfo empty_target;
     while (true) {
       Group g{ctrl + seq.offset()};
       for (uint32_t i : g.Match(H2(hash))) {
@@ -2772,11 +2773,29 @@ class raw_hash_set {
                 PolicyTraits::element(slot_array() + seq.offset(i)))))
           return {seq.offset(i), false};
       }
-      if (ABSL_PREDICT_TRUE(g.MaskEmpty())) break;
+      auto mask = g.MaskEmpty();
+
+      if (ABSL_PREDICT_TRUE(mask)) {
+        empty_target = {seq.offset(mask.LowestBitSet()), seq.index()};
+        break;
+      }
       seq.next();
       assert(seq.index() <= capacity() && "full table!");
     }
-    return {prepare_insert(hash), true};
+    return {prepare_insert(hash, empty_target), true};
+  }
+
+  size_t prepare_insert(size_t hash, FindInfo target) {
+    if (ABSL_PREDICT_FALSE(growth_left() == 0)) {
+      rehash_and_grow_if_necessary();
+      target = find_first_non_full(common(), hash);
+    }
+    common().increment_size();
+    set_growth_left(growth_left() - 1);
+    SetCtrl(common(), target.offset, H2(hash), sizeof(slot_type));
+    common().maybe_increment_generation_on_insert();
+    infoz().RecordInsert(hash, target.probe_length);
+    return target.offset;
   }
 
   // Given the hash of a value not currently in the table, finds the next
@@ -2792,18 +2811,7 @@ class raw_hash_set {
       resize(growth_left() > 0 ? cap : NextCapacity(cap));
     }
     auto target = find_first_non_full(common(), hash);
-    if (!rehash_for_bug_detection &&
-        ABSL_PREDICT_FALSE(growth_left() == 0 &&
-                           !IsDeleted(control()[target.offset]))) {
-      rehash_and_grow_if_necessary();
-      target = find_first_non_full(common(), hash);
-    }
-    common().increment_size();
-    set_growth_left(growth_left() - IsEmpty(control()[target.offset]));
-    SetCtrl(common(), target.offset, H2(hash), sizeof(slot_type));
-    common().maybe_increment_generation_on_insert();
-    infoz().RecordInsert(hash, target.probe_length);
-    return target.offset;
+    return prepare_insert(hash, target);
   }
 
   // Constructs the value in the space pointed by the iterator. This only works
